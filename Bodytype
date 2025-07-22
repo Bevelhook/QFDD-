@@ -1,0 +1,256 @@
+import sys
+import numpy as np
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QLabel, QPushButton, QGroupBox, QTabWidget, QTextEdit)
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont, QPixmap
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from qiskit import QuantumCircuit, Aer
+from qiskit.algorithms import VQE
+from qiskit.algorithms.optimizers import COBYLA
+from qiskit_nature.drivers import Molecule
+from qiskit_nature.drivers.second_quantization import ElectronicStructureDriver
+from qiskit_nature.transformers import ActiveSpaceTransformer
+from qiskit_nature.problems.second_quantization import ElectronicStructureProblem
+from qiskit_nature.converters.second_quantization import QubitConverter
+from qiskit_nature.mappers.second_quantization import ParityMapper
+from qiskit.circuit.library import EfficientSU2
+
+class QuantumChemistryGUI(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Quantum Chemistry Explorer")
+        self.setGeometry(100, 100, 1200, 800)
+        self.setStyleSheet("""
+            QMainWindow { background-color: #2E3440; }
+            QGroupBox { 
+                background-color: #3B4252;
+                color: #E5E9F0;
+                border: 2px solid #4C566A;
+                border-radius: 8px;
+                margin-top: 1ex;
+                font-weight: bold;
+            }
+            QLabel { color: #D8DEE9; }
+            QPushButton {
+                background-color: #5E81AC;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #81A1C1; }
+            QTextEdit {
+                background-color: #434C5E;
+                color: #ECEFF4;
+                border: 1px solid #4C566A;
+                border-radius: 4px;
+                font-family: Consolas;
+            }
+        """)
+        
+        # Central widget and layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        
+        # Left panel: Controls
+        control_panel = QGroupBox("Simulation Controls")
+        control_layout = QVBoxLayout()
+        
+        # Molecule selection
+        mol_group = QGroupBox("Target Molecule")
+        mol_layout = QVBoxLayout()
+        self.mol_label = QLabel("H₂ (Bond Length: 0.735 Å)")
+        mol_layout.addWidget(self.mol_label)
+        mol_group.setLayout(mol_layout)
+        control_layout.addWidget(mol_group)
+        
+        # Parameters
+        param_group = QGroupBox("Quantum Parameters")
+        param_layout = QVBoxLayout()
+        self.param_label = QLabel("Qubits: 4 | Layers: 3 | Shots: 1024")
+        param_layout.addWidget(self.param_label)
+        param_group.setLayout(param_layout)
+        control_layout.addWidget(param_group)
+        
+        # Buttons
+        self.run_btn = QPushButton("Run Simulation")
+        self.run_btn.clicked.connect(self.run_simulation)
+        control_layout.addWidget(self.run_btn)
+        
+        # Equations display
+        eq_group = QGroupBox("Key Equations")
+        eq_layout = QVBoxLayout()
+        equations = QTextEdit()
+        equations.setReadOnly(True)
+        equations.setText("""
+        Molecular Hamiltonian:
+        Ĥ = ∑_{ij} h_{ij} a_i^† a_j + 1/2 ∑_{ijkl} h_{ijkl} a_i^† a_j^† a_k a_l
+        
+        VQE Objective:
+        E(θ) = ⟨ψ(θ)|Ĥ|ψ(θ)⟩
+        
+        Variational Principle:
+        E₀ ≤ ⟨ψ(θ)|Ĥ|ψ(θ)⟩ ∀ θ
+        """)
+        eq_layout.addWidget(equations)
+        eq_group.setLayout(eq_layout)
+        control_layout.addWidget(eq_group)
+        
+        control_panel.setLayout(control_layout)
+        main_layout.addWidget(control_panel, 1)
+        
+        # Right panel: Results
+        result_panel = QWidget()
+        result_layout = QVBoxLayout(result_panel)
+        
+        # Tab widget for multi-view
+        self.tabs = QTabWidget()
+        result_layout.addWidget(self.tabs)
+        
+        # Tab 1: Energy Plot
+        self.energy_tab = QWidget()
+        self.energy_layout = QVBoxLayout(self.energy_tab)
+        self.energy_figure = Figure(figsize=(8, 6), facecolor='#3B4252')
+        self.energy_canvas = FigureCanvas(self.energy_figure)
+        self.energy_layout.addWidget(self.energy_canvas)
+        self.tabs.addTab(self.energy_tab, "Energy Convergence")
+        
+        # Tab 2: Circuit Diagram
+        self.circuit_tab = QWidget()
+        self.circuit_layout = QVBoxLayout(self.circuit_tab)
+        self.circ_label = QLabel()
+        self.circ_label.setAlignment(Qt.AlignCenter)
+        self.circuit_layout.addWidget(self.circ_label)
+        self.tabs.addTab(self.circuit_tab, "Quantum Circuit")
+        
+        # Tab 3: Results
+        self.result_tab = QWidget()
+        result_tab_layout = QVBoxLayout(self.result_tab)
+        self.result_text = QTextEdit()
+        self.result_text.setReadOnly(True)
+        result_tab_layout.addWidget(self.result_text)
+        self.tabs.addTab(self.result_tab, "Numerical Results")
+        
+        main_layout.addWidget(result_panel, 2)
+        
+        # Initialize with default values
+        self.result_text.setText("Click 'Run Simulation' to start quantum chemistry calculation")
+        self.update_energy_plot([], [])
+
+    def update_energy_plot(self, iterations, energies):
+        ax = self.energy_figure.add_subplot(111)
+        ax.clear()
+        
+        # Set dark theme colors
+        ax.set_facecolor('#434C5E')
+        self.energy_figure.patch.set_facecolor('#3B4252')
+        ax.tick_params(colors='#D8DEE9')
+        ax.spines['bottom'].set_color('#D8DEE9')
+        ax.spines['top'].set_color('#D8DEE9')
+        ax.spines['right'].set_color('#D8DEE9')
+        ax.spines['left'].set_color('#D8DEE9')
+        ax.xaxis.label.set_color('#D8DEE9')
+        ax.yaxis.label.set_color('#D8DEE9')
+        ax.title.set_color('#ECEFF4')
+        
+        if iterations:
+            ax.plot(iterations, energies, 'o-', color='#88C0D0', linewidth=2)
+            ax.set_xlabel('Iteration')
+            ax.set_ylabel('Energy (Hartree)')
+            ax.set_title('VQE Energy Convergence')
+            ax.grid(True, color='#4C566A', linestyle='--')
+        else:
+            ax.text(0.5, 0.5, 'Simulation data will appear here', 
+                    horizontalalignment='center', verticalalignment='center',
+                    color='#D8DEE9', fontsize=12)
+            ax.set_xticks([])
+            ax.set_yticks([])
+        
+        self.energy_canvas.draw()
+
+    def run_simulation(self):
+        """Run quantum chemistry simulation for H2 molecule"""
+        self.result_text.setText("Running quantum simulation...")
+        QApplication.processEvents()
+        
+        try:
+            # Setup molecular problem
+            molecule = Molecule(geometry=[['H', [0., 0., 0.]],
+                                        ['H', [0., 0., 0.735]]],
+                               charge=0, multiplicity=1)
+            driver = ElectronicStructureDriver(molecule, basis='sto3g')
+            
+            # Configure quantum problem
+            transformer = ActiveSpaceTransformer(num_electrons=2, num_molecular_orbitals=2)
+            problem = ElectronicStructureProblem(driver, transformers=[transformer])
+            second_q_ops = problem.second_q_ops()
+            hamiltonian = second_q_ops[0]
+            
+            # Qubit mapping
+            converter = QubitConverter(ParityMapper(), two_qubit_reduction=True)
+            qubit_op = converter.convert(hamiltonian, num_particles=problem.num_particles)
+            
+            # Initialize VQE
+            optimizer = COBYLA(maxiter=100)
+            ansatz = EfficientSU2(qubit_op.num_qubits, entanglement='linear', reps=2)
+            vqe = VQE(ansatz, optimizer, quantum_instance=Aer.get_backend('statevector_simulator'))
+            
+            # Run simulation and collect intermediate energies
+            energies = []
+            def callback(eval_count, params, value, meta):
+                energies.append(value)
+            
+            result = vqe.compute_minimum_eigenvalue(qubit_op, callback=callback)
+            
+            # Update UI
+            self.update_results(result, energies, ansatz)
+            
+        except Exception as e:
+            self.result_text.setText(f"Error in simulation:\n{str(e)}")
+
+    def update_results(self, result, energies, ansatz):
+        """Update UI with simulation results"""
+        # Energy plot
+        self.update_energy_plot(range(len(energies)), energies)
+        
+        # Circuit diagram
+        circuit = ansatz.decompose()
+        circuit_image = circuit.draw(output='mpl', style='iqx', scale=0.8)
+        circuit_image.savefig('circuit.png', facecolor='#3B4252', edgecolor='none')
+        pixmap = QPixmap('circuit.png')
+        self.circ_label.setPixmap(pixmap)
+        
+        # Numerical results
+        result_text = f"""⚛️ Quantum Chemistry Results (H₂ Molecule)
+
+Ground State Energy:
+  Quantum (VQE): {result.eigenvalue.real:.6f} Hartree
+  Classical (Exact): -1.137270 Hartree
+  Error: {abs(result.eigenvalue.real + 1.137270):.6f} Hartree
+
+Simulation Details:
+  Qubits: {ansatz.num_qubits}
+  Parameters: {ansatz.num_parameters}
+  Iterations: {len(energies)}
+  Converged: {result.optimizer_result is not None}
+
+Physical Significance:
+  1 Hartree = 27.211 eV = 627.509 kcal/mol
+  H₂ Dissociation Energy: ~4.52 eV (experimental)
+
+Quantum Resources:
+  Circuit Depth: {circuit.depth()}
+  2-Qubit Gates: {circuit.num_nonlocal_gates()}"""
+        
+        self.result_text.setText(result_text)
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Arial", 10))
+    window = QuantumChemistryGUI()
+    window.show()
+    sys.exit(app.exec_())
