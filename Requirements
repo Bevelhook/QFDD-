@@ -1,0 +1,5 @@
+qiskit==1.0.0
+qiskit_nature==0.7.0
+PyQt5==5.15.9
+matplotlib==3.7.1
+numpy==1.24.3
